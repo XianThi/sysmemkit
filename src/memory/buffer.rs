@@ -1,8 +1,8 @@
 use std::ffi::c_void;
 use std::mem;
 
-use crate::syscalls::invoker::do_syscall;
-use crate::syscalls::resolver::{get_ntdll_base, get_ssn_by_hash};
+use crate::syscalls::invoker::{SyscallInvoker};
+use crate::syscalls::resolver::{get_ssn_by_hash};
 use crate::utils::dbj2_hash;
 
 pub const PAGE_READWRITE: u32 = 0x04;
@@ -22,6 +22,8 @@ pub struct MEMORY_BASIC_INFORMATION {
 }
 
 pub unsafe fn smart_write(
+    invoker:SyscallInvoker,
+    ntdll:*mut c_void,
     process_handle: *mut c_void,
     target_address: *mut c_void,
     data: &[u8],
@@ -30,7 +32,6 @@ pub unsafe fn smart_write(
         if process_handle.is_null() || target_address.is_null() || data.is_empty() {
             return false;
         }
-        let ntdll = get_ntdll_base();
         if ntdll.is_null() {
             return false;
         }
@@ -68,7 +69,7 @@ pub unsafe fn smart_write(
             std::mem::size_of::<MEMORY_BASIC_INFORMATION>(),
             0,
         ];
-        let query_status = do_syscall(ssn_query, args_query.as_mut_ptr());
+        let query_status = invoker.invoke(ssn_query, args_query.as_mut_ptr());
         if query_status != 0 {
             return false;
         }
@@ -86,7 +87,7 @@ pub unsafe fn smart_write(
                 PAGE_EXECUTE_READWRITE as usize,
                 &mut old_protect as *mut _ as usize,
             ];
-            let protect_status = do_syscall(ssn_protect, args_protect.as_mut_ptr());
+            let protect_status = invoker.invoke(ssn_protect, args_protect.as_mut_ptr());
             if protect_status != 0 {
                 return false;
             }
@@ -100,7 +101,7 @@ pub unsafe fn smart_write(
             data.len(),
             &mut bytes_written as *mut _ as usize,
         ];
-        let write_status = do_syscall(ssn_write, args_write.as_mut_ptr());
+        let write_status = invoker.invoke(ssn_write, args_write.as_mut_ptr());
         let success = write_status == 0 && bytes_written == data.len();
 
         if success {
@@ -118,7 +119,7 @@ pub unsafe fn smart_write(
                 old_protect as usize,
                 &mut junk_protect as *mut _ as usize,
             ];
-            let restore_status = do_syscall(ssn_protect, args_restore.as_mut_ptr());
+            let restore_status = invoker.invoke(ssn_protect, args_restore.as_mut_ptr());
             if restore_status == 0 {
             } else {
             }
@@ -128,16 +129,15 @@ pub unsafe fn smart_write(
     }
 }
 
-pub unsafe fn write<T>(process_handle: *mut c_void, address: usize, value: T) -> bool {
+pub unsafe fn write<T>(invoker:SyscallInvoker,ntdll:*mut c_void,process_handle: *mut c_void, address: usize, value: T) -> bool {
     unsafe {
         let data = std::slice::from_raw_parts(&value as *const T as *const u8, mem::size_of::<T>());
-        smart_write(process_handle, address as *mut c_void, data)
+        smart_write(invoker,ntdll,process_handle, address as *mut c_void, data)
     }
 }
 
-pub unsafe fn read_buffer(process_handle: *mut c_void, address: usize, buffer: &mut [u8]) -> bool {
+pub unsafe fn read_buffer(invoker:SyscallInvoker,ntdll:*mut c_void,process_handle: *mut c_void, address: usize, buffer: &mut [u8]) -> bool {
     unsafe {
-        let ntdll = get_ntdll_base();
         let ssn_read = get_ssn_by_hash(ntdll, dbj2_hash("NtReadVirtualMemory")).unwrap();
 
         let mut bytes_read: usize = 0;
@@ -149,21 +149,20 @@ pub unsafe fn read_buffer(process_handle: *mut c_void, address: usize, buffer: &
             &mut bytes_read as *mut usize as usize,
         ];
 
-        let status = do_syscall(ssn_read, args.as_mut_ptr());
+        let status = invoker.invoke(ssn_read, args.as_mut_ptr());
         status == 0 && bytes_read == buffer.len()
     }
 }
 
-pub unsafe fn read_bytes(process_handle: *mut c_void, address: usize, size: usize) -> Vec<u8> {
+pub unsafe fn read_bytes(invoker:SyscallInvoker,ntdll:*mut c_void,process_handle: *mut c_void, address: usize, size: usize) -> Vec<u8> {
     let mut buffer = vec![0u8; size];
-    let succes = unsafe { read_buffer(process_handle, address, &mut buffer) };
+    let succes = unsafe { read_buffer(invoker,ntdll,process_handle, address, &mut buffer) };
     if succes { buffer } else { Vec::new() }
 }
 
-pub unsafe fn read<T>(process_handle: *mut c_void, address: usize) -> T {
+pub unsafe fn read<T>(invoker:SyscallInvoker, ntdll:*mut c_void,process_handle: *mut c_void, address: usize) -> T {
     unsafe {
         let mut buffer: T = mem::zeroed();
-        let ntdll = get_ntdll_base();
         let ssn_read = get_ssn_by_hash(ntdll, dbj2_hash("NtReadVirtualMemory")).unwrap();
 
         let mut bytes_read: usize = 0;
@@ -175,7 +174,7 @@ pub unsafe fn read<T>(process_handle: *mut c_void, address: usize) -> T {
             &mut bytes_read as *mut usize as usize,
         ];
 
-        do_syscall(ssn_read, args.as_mut_ptr());
+        invoker.invoke(ssn_read, args.as_mut_ptr());
         buffer
     }
 }

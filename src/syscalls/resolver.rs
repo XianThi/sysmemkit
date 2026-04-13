@@ -154,7 +154,7 @@ pub struct UNICODE_STRING {
     pub buffer: *mut u16,
 }
 
-pub unsafe fn get_ntdll_base() -> *mut c_void {
+pub unsafe fn get_dll_base(modulename: &str) -> (*mut c_void, usize) {
     let peb_ptr: *mut PEB;
     unsafe {
         asm!(
@@ -164,12 +164,12 @@ pub unsafe fn get_ntdll_base() -> *mut c_void {
         );
 
         if peb_ptr.is_null() {
-            return std::ptr::null_mut();
+            return (std::ptr::null_mut(), 0);
         }
 
         let ldr = (*peb_ptr).ldr;
         if ldr.is_null() {
-            return std::ptr::null_mut();
+            return (std::ptr::null_mut(), 0);
         }
 
         let list_head = &(*ldr).in_load_order_module_list as *const LIST_ENTRY as *mut LIST_ENTRY;
@@ -186,8 +186,10 @@ pub unsafe fn get_ntdll_base() -> *mut c_void {
                     let name_slice = std::slice::from_raw_parts(dll_name.buffer, name_len);
                     let name = String::from_utf16_lossy(name_slice);
 
-                    if name.to_lowercase() == "ntdll.dll" {
-                        return (*entry).dll_base;
+                    if name.to_lowercase() == modulename {
+                        let dll_base = (*entry).dll_base;
+                        let size_of_image = (*entry).size_of_image;
+                        return (dll_base, size_of_image as usize);
                     }
                 }
             }
@@ -195,8 +197,16 @@ pub unsafe fn get_ntdll_base() -> *mut c_void {
             current = (*current).flink;
         }
 
-        std::ptr::null_mut()
+        return (std::ptr::null_mut(), 0);
     }
+}
+
+pub unsafe fn get_ntdll_base() -> (*mut c_void, usize) {
+    return unsafe { get_dll_base("ntdll.dll") };
+}
+
+pub unsafe fn get_win32u_base() -> (*mut c_void, usize) {
+    return unsafe { get_dll_base("win32u.dll") };
 }
 
 pub unsafe fn print_function_bytes(ntdll_base: *mut c_void, func_name: &str) {
@@ -251,7 +261,8 @@ pub unsafe fn get_ssn_by_hash(ntdll_base: *mut c_void, target_hash: u32) -> Opti
     }
     unsafe {
         let dos_header = ntdll_base as *const IMAGE_DOS_HEADER;
-        if (*dos_header).e_magic != 0x5A4D { //MZ
+        if (*dos_header).e_magic != 0x5A4D {
+            //MZ
             return None;
         }
 
@@ -325,9 +336,8 @@ pub unsafe fn get_ssn_by_hash(ntdll_base: *mut c_void, target_hash: u32) -> Opti
     }
 }
 
-pub unsafe fn get_syscall_number(func_hash: u32) -> Option<u16> {
+pub unsafe fn get_syscall_number(ntdll_base: *mut c_void, func_hash: u32) -> Option<u16> {
     unsafe {
-        let ntdll_base = get_ntdll_base();
         if ntdll_base.is_null() {
             return None;
         }
@@ -335,9 +345,9 @@ pub unsafe fn get_syscall_number(func_hash: u32) -> Option<u16> {
     }
 }
 
-pub unsafe fn get_syscall_number_by_name(func_name: &str) -> Option<u16> {
+pub unsafe fn get_syscall_number_by_name(ntdll_base: *mut c_void, func_name: &str) -> Option<u16> {
     unsafe {
         let hash = utils::dbj2_hash(func_name);
-        get_syscall_number(hash)
+        get_syscall_number(ntdll_base, hash)
     }
 }
