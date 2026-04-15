@@ -85,3 +85,40 @@ pub unsafe fn pattern_scan_local(start: usize, size: usize, pattern: &str) -> Op
     }
     None
 }
+
+pub unsafe fn pattern_scan_all_local(start: usize, size: usize, pattern: &str) -> Vec<usize> {
+    let mut matches = Vec::new();
+    let pattern_bytes: Vec<Option<u8>> = pattern
+        .split_whitespace()
+        .map(|b| {
+            if b == "?" || b == "??" {
+                None
+            } else {
+                Some(u8::from_str_radix(b, 16).expect("Geçersiz hex formatı"))
+            }
+        })
+        .collect();
+
+    let pattern_len = pattern_bytes.len();
+    if pattern_len == 0 || size < pattern_len {
+        return matches;
+    }
+    for i in 0..=(size - pattern_len) {
+        let mut found = true;
+        for (j, byte) in pattern_bytes.iter().enumerate() {
+            if let Some(b) = byte {
+                let current_byte = *((start + i + j) as *const u8);
+                if current_byte != *b {
+                    found = false;
+                    break;
+                }
+            }
+        }
+
+        if found {
+            matches.push(start + i);
+        }
+    }
+
+    matches
+}

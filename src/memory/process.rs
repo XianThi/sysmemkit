@@ -94,7 +94,7 @@ use crate::syscalls::resolver::get_ssn_by_hash;
 use crate::utils::dbj2_hash;
 
 pub unsafe fn get_pid_by_hash(
-    invoker: SyscallInvoker,
+    invoker: &SyscallInvoker,
     ntdll: *mut c_void,
     target_name_hash: u32,
 ) -> Option<u32> {
@@ -176,7 +176,7 @@ pub unsafe fn get_pid_by_hash(
 }
 
 pub unsafe fn manual_open_process(
-    invoker: SyscallInvoker,
+    invoker: &SyscallInvoker,
     ntdll: *mut c_void,
     pid: u32,
 ) -> Option<*mut c_void> {
@@ -251,7 +251,7 @@ pub unsafe fn manual_open_process(
 }
 
 pub unsafe fn hijack_handle(
-    invoker: SyscallInvoker,
+    invoker: &SyscallInvoker,
     ntdll: *mut c_void,
     target_pid: u32,
 ) -> Option<*mut c_void> {
@@ -266,7 +266,7 @@ pub unsafe fn hijack_handle(
 }
 
 pub unsafe fn openfile(
-    invoker: SyscallInvoker,
+    invoker: &SyscallInvoker,
     ntdll: *mut c_void,
     path: &str,
 ) -> Option<std::os::windows::raw::HANDLE> {
@@ -310,7 +310,7 @@ pub unsafe fn openfile(
 }
 
 pub unsafe fn create_section(
-    invoker: SyscallInvoker,
+    invoker: &SyscallInvoker,
     ntdll: *mut c_void,
     file_handle: HANDLE,
 ) -> Option<HANDLE> {
@@ -337,7 +337,7 @@ pub unsafe fn create_section(
 }
 
 pub unsafe fn map_view_of_section(
-    invoker: SyscallInvoker,
+    invoker: &SyscallInvoker,
     ntdll: *mut c_void,
     section_handle: HANDLE,
 ) -> Option<*mut c_void> {
@@ -368,7 +368,7 @@ pub unsafe fn map_view_of_section(
     }
 }
 
-pub unsafe fn find_window_syscall(invoker: SyscallInvoker, ssn: u16, title: &str) -> isize {
+pub unsafe fn find_window_syscall(invoker: &SyscallInvoker, ssn: u16, title: &str) -> isize {
     let utf16_title: Vec<u16> = title.encode_utf16().chain(std::iter::once(0)).collect();
     let mut unicode_title = UNICODE_STRING {
         length: ((utf16_title.len() - 1) * 2) as u16,
@@ -387,7 +387,7 @@ pub unsafe fn find_window_syscall(invoker: SyscallInvoker, ssn: u16, title: &str
     handle as isize
 }
 
-pub unsafe fn enum_windows_syscall(invoker: SyscallInvoker, ssn: u16) {
+pub unsafe fn enum_windows_syscall(invoker: &SyscallInvoker, ssn: u16) {
     let mut count: u32 = 0;
     let mut hwnd_buffer = [0isize; 1024];
 
@@ -412,7 +412,7 @@ pub unsafe fn enum_windows_syscall(invoker: SyscallInvoker, ssn: u16) {
 }
 
 unsafe fn read_remote<T>(
-    invoker: SyscallInvoker,
+    invoker: &SyscallInvoker,
     handle: *mut c_void,
     ssn: u16,
     addr: usize,
@@ -432,7 +432,7 @@ unsafe fn read_remote<T>(
 }
 
 unsafe fn read_remote_buffer(
-    invoker: SyscallInvoker,
+    invoker: &SyscallInvoker,
     handle: *mut c_void,
     ssn: u16,
     addr: usize,
@@ -453,7 +453,7 @@ unsafe fn read_remote_buffer(
 }
 
 pub unsafe fn get_module_base(
-    invoker: SyscallInvoker,
+    invoker: &SyscallInvoker,
     ntdll: *mut c_void,
     process_handle: *mut c_void,
     module_name_hash: u32,

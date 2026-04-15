@@ -70,8 +70,8 @@ impl SysMemKit {
             hash = std::str::FromStr::from_str(target_name).unwrap();
         }
         unsafe {
-            let pid = memory::process::get_pid_by_hash(invoker, ntdll_base, hash)?;
-            let handle = memory::process::hijack_handle(invoker, ntdll_base, pid)?;
+            let pid = memory::process::get_pid_by_hash(&invoker, ntdll_base, hash)?;
+            let handle = memory::process::hijack_handle(&invoker, ntdll_base, pid)?;
             Some(Self {
                 process_handle: handle,
                 ntdll_base,
@@ -81,13 +81,13 @@ impl SysMemKit {
     }
 
     pub unsafe fn read<T>(&self, address: usize) -> T {
-        unsafe { memory::buffer::read(self.invoker, self.ntdll_base, self.process_handle, address) }
+        unsafe { memory::buffer::read(&self.invoker, self.ntdll_base, self.process_handle, address) }
     }
 
     pub unsafe fn write<T>(&self, address: usize, value: T) -> bool {
         unsafe {
             memory::buffer::write(
-                self.invoker,
+                &self.invoker,
                 self.ntdll_base,
                 self.process_handle,
                 address,
@@ -104,7 +104,7 @@ impl SysMemKit {
         let module_name_hash = utils::dbj2_hash(module_name);
         unsafe {
             memory::process::get_module_base(
-                self.invoker,
+                &self.invoker,
                 self.ntdll_base,
                 self.process_handle,
                 module_name_hash,
