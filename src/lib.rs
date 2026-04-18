@@ -26,6 +26,7 @@ impl SysMemKit {
     pub unsafe fn new(target_name: &str, hashed: bool) -> Option<Self> {
         let (ntdll_base, ntdll_size) = unsafe { get_ntdll_base() };
         if ntdll_base.is_null() {
+            println!("ntdll bulunamadı");
             return None;
         }
         let invoker = unsafe {
@@ -69,9 +70,12 @@ impl SysMemKit {
         } else {
             hash = std::str::FromStr::from_str(target_name).unwrap();
         }
+        //println!("hash : {:?}", hash);
         unsafe {
             let pid = memory::process::get_pid_by_hash(&invoker, ntdll_base, hash)?;
+            //println!("pid : {:?}", pid);
             let handle = memory::process::hijack_handle(&invoker, ntdll_base, pid)?;
+            //println!("handle : {:?}", handle);
             Some(Self {
                 process_handle: handle,
                 ntdll_base,
@@ -81,9 +85,21 @@ impl SysMemKit {
     }
 
     pub unsafe fn read<T>(&self, address: usize) -> T {
-        unsafe { memory::buffer::read(&self.invoker, self.ntdll_base, self.process_handle, address) }
+        unsafe {
+            memory::buffer::read(&self.invoker, self.ntdll_base, self.process_handle, address)
+        }
     }
-
+    pub unsafe fn read_buffer(&self, address: usize, size: usize) -> Vec<u8> {
+        unsafe {
+            memory::buffer::read_buffers(
+                &self.invoker,
+                self.ntdll_base,
+                self.process_handle,
+                address,
+                size,
+            )
+        }
+    }
     pub unsafe fn write<T>(&self, address: usize, value: T) -> bool {
         unsafe {
             memory::buffer::write(
@@ -102,6 +118,10 @@ impl SysMemKit {
 
     pub unsafe fn getmodule(&self, module_name: &str) -> Option<usize> {
         let module_name_hash = utils::dbj2_hash(module_name);
+        // println!(
+        //     "module name - hash : {:?} - {:?}",
+        //     module_name, module_name_hash
+        // );
         unsafe {
             memory::process::get_module_base(
                 &self.invoker,

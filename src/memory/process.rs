@@ -460,9 +460,11 @@ pub unsafe fn get_module_base(
 ) -> Option<usize> {
     unsafe {
         if process_handle.is_null() || process_handle == -1isize as *mut c_void {
+            println!("process handle bulunamadı");
             return None;
         }
         if ntdll.is_null() {
+            println!("ntdll handle bulunamadı");
             return None;
         }
 
@@ -481,6 +483,7 @@ pub unsafe fn get_module_base(
         ];
 
         let status = invoker.invoke(ssn_query, args_query.as_mut_ptr());
+        //println!("module invoke status : {:?}", status);
         if status != 0 {
             return None;
         }

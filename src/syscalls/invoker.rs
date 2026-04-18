@@ -8,6 +8,15 @@ pub struct Gadget {
     pub size: usize,
 }
 
+#[repr(C)]
+pub struct SyscallConfig {
+    pub jump_address: usize,
+    pub return_address: usize,
+    pub nargs: usize,
+    pub args: [usize; 11],
+    pub ssn: u32,
+}
+
 pub unsafe fn find_all_syscall_stub_pattern(
     ntdll_base: *mut c_void,
     ntdll_size: usize,
@@ -99,38 +108,75 @@ fn build_rop_chain(available: &[Gadget], target: usize) -> Vec<Gadget> {
         .duration_since(UNIX_EPOCH)
         .unwrap()
         .as_nanos() as usize;
-    let mut attempts = 0;
-    while total < target && attempts < 100 {
-        seed = seed.wrapping_mul(1103515245).wrapping_add(12345);
+    let mut sorted = available.to_vec();
+    sorted.sort_by(|a, b| b.size.cmp(&a.size)); 
+
+    for g in sorted.iter() {
+        if total + g.size + 8 > target {
+            continue;
+        }
+        chain.push(*g);
+        total += g.size + 8;
+        if total >= target {
+            break;
+        }
+    }
+    while total < target {
+        seed = seed.wrapping_mul(6364136223846793005).wrapping_add(12345);
         let idx = (seed >> 16) % available.len();
         let g = &available[idx];
-        let effective = g.size + 8;
-        chain.push(*g);
-        total += effective;
-        attempts += 1;
+        if total + g.size + 8 <= target {
+            chain.push(*g);
+            total += g.size + 8;
+        } else {
+            break;
+        }
     }
-    // for g in available {
-    //     let effective = g.size + 8;
 
-    //     if total + effective > target {
-    //         continue;
-    //     }
-    //     chain.push(*g);
-    //     total += effective;
-
-    //     if total >= target {
-    //         break;
-    //     }
-    // }
     chain
 }
-pub fn prepare_rop_stack(chain: &[Gadget], syscall_stack_size: usize) -> Vec<usize> {
+
+pub unsafe fn get_legit_paddings(ntdll_base: *mut c_void, ntdll_size: usize) -> Vec<usize> {
+    let mut paddings = Vec::new();
+
+    // "C3" (ret)
+    let ret_gadgets =
+        crate::memory::scanner::pattern_scan_all_local(ntdll_base as usize, ntdll_size, "C3");
+
+    // "CC" (int3)
+    let int3_gadgets =
+        crate::memory::scanner::pattern_scan_all_local(ntdll_base as usize, ntdll_size, "CC");
+
+    for addr in ret_gadgets.iter().chain(int3_gadgets.iter()) {
+        paddings.push(*addr);
+    }
+    paddings.sort();
+    paddings.dedup();
+    paddings
+}
+
+pub fn prepare_rop_stack(
+    chain: &[Gadget],
+    paddings: &[usize],
+    syscall_stack_size: usize,
+) -> Vec<usize> {
     let mut stack = Vec::new();
     //println!("chains: {:?}", chain);
+    let use_deadbeef = paddings.is_empty();
+    let mut seed = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos() as usize;
     for g in chain.iter().rev() {
         let padding_slots = (g.size / 8) - 1;
         for _ in 0..padding_slots {
-            stack.push(0xDEADBEEFDEADBEEF);
+            if use_deadbeef {
+                stack.push(0xDEADBEEFDEADBEEF);
+            } else {
+                seed = seed.wrapping_mul(1103515245).wrapping_add(12345);
+                let idx = (seed >> 16) % paddings.len();
+                stack.push(paddings[idx]);
+            }
         }
         stack.push(g.addr);
 
@@ -147,6 +193,16 @@ pub fn prepare_rop_stack(chain: &[Gadget], syscall_stack_size: usize) -> Vec<usi
     stack
 }
 
+pub unsafe fn get_return_address() -> usize {
+    let mut return_addr = 0;
+    unsafe {
+        asm!(
+            "lea {0}, [rip + 2f]", 
+            out(reg) return_addr
+        );
+    }
+    return_addr
+}
 pub unsafe fn indirect_syscall_rop(
     ssn: u16,
     syscall_addr: *mut c_void,
@@ -154,17 +210,11 @@ pub unsafe fn indirect_syscall_rop(
     args: *mut usize,
 ) -> u32 {
     let mut status: u32;
-    let mut return_addr: usize = 0;
-    unsafe {
-        asm!(
-            "lea {0}, [rip + 2f]", // geriye gelebilmek için dönüş adresini al. label 2:
-            out(reg) return_addr
-        );
-    }
-    let mut stack: Vec<usize> = Vec::new();  // stacki yeniden oluşturalım.
-    stack.push(return_addr);  // dönüş adresi en tepede olacak. (high to low)
+    let return_addr: usize = get_return_address();
+    let mut stack: Vec<usize> = Vec::new(); 
+    stack.push(return_addr); // dönüş adresi en tepede olacak. (high to low)
     for a in stack_image {
-        stack.push(a);      // rop gadgetler ile hazırlanan stacki yazalim.
+        stack.push(a); // stacki doldur
     }
     // println!(
     //     "SSN {:?} - SYSCALL ADDR: {:?} - STACKIMAGE {:?}  - ARGS {:?}",
@@ -191,7 +241,7 @@ pub unsafe fn indirect_syscall_rop(
         "mov rax, [r11 + 64]",      // 9. arg al
         "mov [rsp + 64], rax",      // 9. arg stack
         "mov rax, [r11 + 72]",      // 10. arg al
-        "mov [rsp + 72], rax",      // 10. arg stack 
+        "mov [rsp + 72], rax",      // 10. arg stack
         "mov r10, rcx",             // syscall hazırlığı
         "mov eax, {ssn:e}",         // ssn i yaz
         "jmp {syscall}",            // syscall stuba atla
@@ -299,11 +349,13 @@ pub unsafe fn do_syscall(ssn: u16, args: *mut usize) -> u32 {
 pub struct SyscallInvoker {
     syscall_stub: *mut c_void,
     gadgets: Vec<Gadget>,
+    paddings: Vec<usize>,
 }
 
 impl SyscallInvoker {
     pub unsafe fn new(ntdll_base: *mut c_void, ntdll_size: usize) -> Option<Self> {
         let syscalls = find_all_syscall_stub_pattern(ntdll_base, ntdll_size);
+        //println!("syscall list {:?}", syscalls);
         let syscall_stub = if !syscalls.is_empty() {
             let index = (SystemTime::now()
                 .duration_since(UNIX_EPOCH)
@@ -314,17 +366,22 @@ impl SyscallInvoker {
         } else {
             find_syscall_stub_pattern(ntdll_base, ntdll_size)?
         };
+        //println!("syscall {:?}", syscall_stub);
         let gadgets = find_suitable_gadgets(ntdll_base, ntdll_size);
+        //println!("gadgets {:?}", gadgets);
+        let legit_paddings = get_legit_paddings(ntdll_base, ntdll_size);
+        //println!("paddings {:?}", legit_paddings);
         Some(Self {
-            syscall_stub,
-            gadgets,
+            syscall_stub: syscall_stub,
+            gadgets: gadgets,
+            paddings: legit_paddings,
         })
     }
 
     pub unsafe fn invoke(&self, ssn: u16, args: *mut usize) -> u32 {
         let syscall_stack_size = 0x80;
         let chain = build_rop_chain(&self.gadgets, 0x80);
-        let mut stack = prepare_rop_stack(&chain, syscall_stack_size);
+        let mut stack = prepare_rop_stack(&chain, &self.paddings, syscall_stack_size);
         if (stack.len() * 8) % 16 != 0 {
             stack.push(0);
         }
