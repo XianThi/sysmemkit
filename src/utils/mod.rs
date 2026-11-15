@@ -1,3 +1,4 @@
+/// DJB2 (xor'suz) — ntdll export adlarını hash'lemek için kullanılır.
 pub const fn dbj2_hash(s: &str) -> u32 {
     let mut hash: u32 = 5381;
     let bytes = s.as_bytes();
@@ -8,17 +9,31 @@ pub const fn dbj2_hash(s: &str) -> u32 {
     }
     hash
 }
-#[repr(C)]
-#[derive(Debug, Copy, Clone)]
-pub struct Vec3 {
-    pub x: f32,
-    pub y: f32,
-    pub z: f32,
-}
 
-impl Vec3 {
-    pub fn distance(&self, other: &Vec3) -> f32 {
-        ((self.x - other.x).powi(2) + (self.y - other.y).powi(2) + (self.z - other.z).powi(2))
-            .sqrt()
+#[cfg(test)]
+mod tests {
+    use super::dbj2_hash;
+
+    #[test]
+    fn dj2b_empty_is_seed() {
+        assert_eq!(dbj2_hash(""), 5381);
+    }
+
+    #[test]
+    fn dbj2_known_values() {
+        // 5381 * 33 + 'a'(97)
+        assert_eq!(dbj2_hash("a"), 177_670);
+        assert_eq!(dbj2_hash("a"), (5381u32.wrapping_mul(33)).wrapping_add(97));
+    }
+
+    #[test]
+    fn dbj2_is_ascii_case_sensitive() {
+        assert_ne!(dbj2_hash("NtReadVirtualMemory"), dbj2_hash("ntreadvirtualmemory"));
+    }
+
+    #[test]
+    fn dbj2_usable_in_const_context() {
+        const HASH: u32 = dbj2_hash("NtClose");
+        assert_eq!(HASH, dbj2_hash("NtClose"));
     }
 }

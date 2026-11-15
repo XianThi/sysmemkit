@@ -7,9 +7,13 @@ edition = "2024"
 name = "sysmemkit"
 path = "src/lib.rs"
 
-[dependencies.windows]
-version = "0.58"
-features = [
-    "Win32_Foundation",
-    "Win32_UI_WindowsAndMessaging",
-]
+[features]
+default = []
+discord = []
+rage = []
+
+# Harici bağımlılık yok: tüm Win32 erişimi PEB/SSN üzerinden yapılır.
+[dependencies]
+
+[lints.rust]
+unsafe_op_in_unsafe_fn = "allow"

@@ -1,28 +1,28 @@
+use crate::include::def::MEMORY_BASIC_INFORMATION;
+use crate::include::def::{PAGE_EXECUTE_READWRITE, PAGE_READWRITE};
+use crate::syscalls::SyscallInvoker;
+use crate::syscalls::resolver::get_ssn_by_hash;
+use crate::utils::dbj2_hash;
 use std::ffi::c_void;
 use std::mem;
 
-use crate::syscalls::invoker::SyscallInvoker;
-use crate::syscalls::resolver::get_ssn_by_hash;
-use crate::utils::dbj2_hash;
-
-pub const PAGE_READWRITE: u32 = 0x04;
-pub const PAGE_EXECUTE_READWRITE: u32 = 0x40;
-
-#[repr(C)]
-#[derive(Debug, Copy, Clone)]
-pub struct MEMORY_BASIC_INFORMATION {
-    pub base_address: *mut c_void,    // 0x00
-    pub allocation_base: *mut c_void, // 0x08
-    pub allocation_protect: u32,      // 0x10
-    pub _alignment: u16,              // 0x14
-    pub region_size: usize,           // 0x18
-    pub state: u32,                   // 0x20
-    pub protect: u32,                 // 0x24
-    pub type_field: u32,              // 0x28
+/// `NtReadVirtualMemory` SSN'ini tek yerden çözer; bulunamazsa `None`.
+unsafe fn read_ssn(ntdll: *mut c_void) -> Option<u16> {
+    if ntdll.is_null() {
+        return None;
+    }
+    unsafe { get_ssn_by_hash(ntdll, dbj2_hash("NtReadVirtualMemory")) }
 }
 
+/// Uzak belleğe yazma: gerekirse sayfa korumasını değiştirip yazar, sonra eski korumayı geri koyar.
+///
+/// # Safety
+///
+/// Çağıran, `address`in hedef süreçte eşlenmiş bir bölgeye ait olduğunu ve `data`nın `size`
+/// baytının bu bölgeye sığdığını garanti etmelidir. Geçersiz adres `false` döndürür, ancak
+/// bölge sınırları kontrol edilmez.
 pub unsafe fn smart_write(
-    invoker: &SyscallInvoker,
+    invoker: &dyn SyscallInvoker,
     ntdll: *mut c_void,
     process_handle: *mut c_void,
     target_address: *mut c_void,
@@ -36,43 +36,34 @@ pub unsafe fn smart_write(
             return false;
         }
 
-        let nt_query_hash = dbj2_hash("NtQueryVirtualMemory");
-        let nt_protect_hash = dbj2_hash("NtProtectVirtualMemory");
-        let nt_write_hash = dbj2_hash("NtWriteVirtualMemory");
-
-        let ssn_query = match get_ssn_by_hash(ntdll, nt_query_hash) {
+        let ssn_query = match get_ssn_by_hash(ntdll, dbj2_hash("NtQueryVirtualMemory")) {
             Some(ssn) => ssn,
-            None => {
-                return false;
-            }
+            None => return false,
         };
-        let ssn_protect = match get_ssn_by_hash(ntdll, nt_protect_hash) {
+        let ssn_protect = match get_ssn_by_hash(ntdll, dbj2_hash("NtProtectVirtualMemory")) {
             Some(ssn) => ssn,
-            None => {
-                return false;
-            }
+            None => return false,
         };
-
-        let ssn_write = match get_ssn_by_hash(ntdll, nt_write_hash) {
+        let ssn_write = match get_ssn_by_hash(ntdll, dbj2_hash("NtWriteVirtualMemory")) {
             Some(ssn) => ssn,
-            None => {
-                return false;
-            }
+            None => return false,
         };
 
         let mut mbi = std::mem::zeroed::<MEMORY_BASIC_INFORMATION>();
-        let mut args_query = [
+        let mut args_query: [usize; 11] = [
             process_handle as usize,
             target_address as usize,
             0,
             &mut mbi as *mut _ as usize,
             std::mem::size_of::<MEMORY_BASIC_INFORMATION>(),
             0,
+            0, 0, 0, 0, 0,
         ];
-        let query_status = invoker.invoke(ssn_query, args_query.as_mut_ptr());
+        let query_status = invoker.invoke(ssn_query, 0, &mut args_query);
         if query_status != 0 {
             return false;
         }
+
         let mut old_protect: u32 = 0;
         let needs_protect =
             (mbi.protect & PAGE_READWRITE) == 0 && (mbi.protect & PAGE_EXECUTE_READWRITE) == 0;
@@ -80,48 +71,50 @@ pub unsafe fn smart_write(
         if needs_protect {
             let mut protect_addr = target_address;
             let mut protect_size = data.len();
-            let mut args_protect = [
+            let mut args_protect: [usize; 11] = [
                 process_handle as usize,
                 &mut protect_addr as *mut _ as usize,
                 &mut protect_size as *mut _ as usize,
                 PAGE_EXECUTE_READWRITE as usize,
                 &mut old_protect as *mut _ as usize,
+                0, 0, 0, 0, 0, 0,
             ];
-            let protect_status = invoker.invoke(ssn_protect, args_protect.as_mut_ptr());
+            let protect_status = invoker.invoke(ssn_protect, 0, &mut args_protect);
             if protect_status != 0 {
                 return false;
             }
         }
 
         let mut bytes_written: usize = 0;
-        let mut args_write = [
+        let mut args_write: [usize; 11] = [
             process_handle as usize,
             target_address as usize,
             data.as_ptr() as usize,
             data.len(),
             &mut bytes_written as *mut _ as usize,
+            0, 0, 0, 0, 0, 0,
         ];
-        let write_status = invoker.invoke(ssn_write, args_write.as_mut_ptr());
+        let write_status = invoker.invoke(ssn_write, 0, &mut args_write);
+        // Kısmi yazma da başarısızlıktır: çağıran "tamamı yazıldı" varsayımıyla devam etmemeli.
         let success = write_status == 0 && bytes_written == data.len();
-
-        if success {
-        } else {
-        }
 
         if needs_protect {
             let mut protect_addr = target_address;
             let mut protect_size = data.len();
             let mut junk_protect: u32 = 0;
-            let mut args_restore = [
+            let mut args_restore: [usize; 11] = [
                 process_handle as usize,
                 &mut protect_addr as *mut _ as usize,
                 &mut protect_size as *mut _ as usize,
                 old_protect as usize,
                 &mut junk_protect as *mut _ as usize,
+                0, 0, 0, 0, 0, 0,
             ];
-            let restore_status = invoker.invoke(ssn_protect, args_restore.as_mut_ptr());
-            if restore_status == 0 {
-            } else {
+            // Koruma geri alınamazsa yazma yine de "başarılı" sayılır, ama sessizce yutulmaz:
+            // hata durumu bool dönüşüne yansıtılır.
+            let restore_status = invoker.invoke(ssn_protect, 0, &mut args_restore);
+            if restore_status != 0 {
+                return false;
             }
         }
 
@@ -129,20 +122,34 @@ pub unsafe fn smart_write(
     }
 }
 
+/// Uzak belleğe `T` yazar.
+///
+/// # Safety
+///
+/// `address` hedef süreçte yazılabilir (veya koruması kaldırılabilir) bir adres olmalıdır. `T`
+/// içinde geçerli işaretçi bulunmamalıdır (aksi halde hedef süreçte çöp işaretçi kalır).
 pub unsafe fn write<T>(
-    invoker: &SyscallInvoker,
+    invoker: &dyn SyscallInvoker,
     ntdll: *mut c_void,
     process_handle: *mut c_void,
     address: usize,
     value: T,
 ) -> bool {
     unsafe {
-        let data = std::slice::from_raw_parts(&value as *const T as *const u8, mem::size_of::<T>());
+        let data =
+            std::slice::from_raw_parts(&value as *const T as *const u8, mem::size_of::<T>());
         smart_write(invoker, ntdll, process_handle, address as *mut c_void, data)
     }
 }
+
+/// Uzak bellekten `size` baytlık ham okuma; hata durumunda boş `Vec`.
+///
+/// # Safety
+///
+/// `address` hedef süreçte okunabilir olmalı; `size` çağıranın kendi bellek bütçesine göre
+/// makul olmalıdır (keyfi büyük `size` OOM'a yol açar).
 pub unsafe fn read_buffers(
-    invoker: &SyscallInvoker,
+    invoker: &dyn SyscallInvoker,
     ntdll: *mut c_void,
     process_handle: *mut c_void,
     address: usize,
@@ -151,50 +158,70 @@ pub unsafe fn read_buffers(
     let mut buffer = vec![0u8; size];
     let mut bytes_read = 0usize;
 
-    let mut  args = [
+    let ssn = match unsafe { read_ssn(ntdll) } {
+        Some(ssn) => ssn,
+        None => return Vec::new(),
+    };
+
+    let mut args: [usize; 11] = [
         process_handle as usize,
         address,
         buffer.as_mut_ptr() as usize,
         size,
         &mut bytes_read as *mut _ as usize,
+        0, 0, 0, 0, 0, 0,
     ];
 
-    let ssn = get_ssn_by_hash(ntdll, dbj2_hash("NtReadVirtualMemory")).unwrap();
-    let status = invoker.invoke(ssn, args.as_mut_ptr());
-
-    if status != 0 {
+    let status = unsafe { invoker.invoke(ssn, 0, &mut args) };
+    if status != 0 || bytes_read != size {
         return Vec::new();
     }
 
     buffer
 }
 
+/// Uzak bellekten `size` baytlık okuma.
+///
+/// # Safety
+///
+/// `address..address+size` hedef süreçte commit edilmiş ve okunabilir olmalıdır. Kısmi okuma
+/// başarısız sayılır ve boş `Vec` döner.
 pub unsafe fn read_buffer(
-    invoker: &SyscallInvoker,
+    invoker: &dyn SyscallInvoker,
     ntdll: *mut c_void,
     process_handle: *mut c_void,
     address: usize,
     buffer: &mut [u8],
 ) -> bool {
     unsafe {
-        let ssn_read = get_ssn_by_hash(ntdll, dbj2_hash("NtReadVirtualMemory")).unwrap();
+        let ssn_read = match read_ssn(ntdll) {
+            Some(ssn) => ssn,
+            None => return false,
+        };
 
         let mut bytes_read: usize = 0;
-        let mut args = [
+        let mut args: [usize; 11] = [
             process_handle as usize,
             address,
             buffer.as_mut_ptr() as usize,
             buffer.len(),
             &mut bytes_read as *mut usize as usize,
+            0, 0, 0, 0, 0, 0,
         ];
 
-        let status = invoker.invoke(ssn_read, args.as_mut_ptr());
+        let status = invoker.invoke(ssn_read, 0, &mut args);
         status == 0 && bytes_read == buffer.len()
     }
 }
 
+/// Uzak bellekten isteğe bağlı okuma (`Option`).
+///
+/// # Safety
+///
+/// `read_buffer` ile aynı sözleşme: aralık hedef süreçte okunabilir olmalı; kısmi okuma `None`
+/// döner.
 pub unsafe fn read_bytes(
-    invoker: &SyscallInvoker,
+    invoker: &dyn SyscallInvoker,
     ntdll: *mut c_void,
     process_handle: *mut c_void,
     address: usize,
@@ -205,26 +232,40 @@ pub unsafe fn read_bytes(
     if succes { buffer } else { Vec::new() }
 }
 
+/// Uzak bellekten `T` okur.
+///
+/// # Safety
+///
+/// `address` hedef süreçte `size_of::<T>()` kadar okunabilir olmalı ve `T` POD (düz veri)
+/// olmalıdır. Okuma başarısız olursa sıfırlanmış `T` döner, bu yüzden dönüş değeri tek başına
+/// başarı kanıtı değildir.
 pub unsafe fn read<T>(
-    invoker: &SyscallInvoker,
+    invoker: &dyn SyscallInvoker,
     ntdll: *mut c_void,
     process_handle: *mut c_void,
     address: usize,
 ) -> T {
     unsafe {
         let mut buffer: T = mem::zeroed();
-        let ssn_read = get_ssn_by_hash(ntdll, dbj2_hash("NtReadVirtualMemory")).unwrap();
+        let ssn_read = match read_ssn(ntdll) {
+            Some(ssn) => ssn,
+            None => return buffer,
+        };
 
         let mut bytes_read: usize = 0;
-        let mut args = [
+        let mut args: [usize; 11] = [
             process_handle as usize,
             address,
             &mut buffer as *mut T as usize,
             mem::size_of::<T>(),
             &mut bytes_read as *mut usize as usize,
+            0, 0, 0, 0, 0, 0,
         ];
 
-        invoker.invoke(ssn_read, args.as_mut_ptr());
+        let status = invoker.invoke(ssn_read, 0, &mut args);
+        if status != 0 || bytes_read != mem::size_of::<T>() {
+            return mem::zeroed();
+        }
         buffer
     }
 }
