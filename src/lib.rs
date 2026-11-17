@@ -56,6 +56,7 @@ pub struct SysMemKit {
     ntdll_base: *mut c_void,
     invoker: Box<dyn SyscallInvoker>,
     resolver: Box<dyn SsnResolver>,
+    read_ssn: Option<Ssn>,
     pid: u32,
     mode: Mode,
 }
@@ -87,7 +88,13 @@ impl SysMemKit {
             Box::new(unsafe { IndirectInvoker::new(ntdll_base, ntdll_size) });
 
         let resolver = HookAwareResolver::new(ntdll_base);
-        let hash = utils::dbj2_hash("discord.exe");
+        const H_NT_READ: u32 = utils::dbj2_hash("NtReadVirtualMemory");
+        let read_ssn = resolver.resolve(H_NT_READ);
+        if let Some(ssn) = read_ssn {
+            memory::buffer::set_read_ssn(ssn.number);
+        }
+        const H_DISCORD: u32 = utils::dbj2_hash("discord.exe");
+        let hash = H_DISCORD;
 
         memory::process::get_discord_overlay_pid(invoker.as_ref(), ntdll_base, hash).and_then(|pid| {
             println!("Discord pid : {:?}", pid);
@@ -96,6 +103,7 @@ impl SysMemKit {
                 ntdll_base,
                 invoker,
                 resolver: Box::new(resolver),
+                read_ssn,
                 pid,
                 mode: Mode::DirectStealth,
             })
@@ -113,16 +121,14 @@ impl SysMemKit {
         unsafe { Self::get_discord() }
     }
 
-    /// Süreç adı veya hash'inden belirtilen mod ile yeni bir kit açar.
+    /// Derleme zamanı hesaplanmış süreç DJB2 hash'inden yeni bir kit açar (binary'de string bırakmaz).
     ///
     /// # Safety
     ///
-    /// `target_name` geçerli bir süreç adı (veya `hashed` ise sayısal hash) olmalıdır; fonksiyon
-    /// handle hijack yapar ve hedef süreçte handle açar.
-    pub unsafe fn with_mode(target_name: &str, hashed: bool, mode: Mode) -> Option<Self> {
+    /// `target_hash` hedef süreç adının küçük harfli DJB2 hash'i olmalıdır.
+    pub unsafe fn with_mode_hash(target_hash: u32, mode: Mode) -> Option<Self> {
         let (ntdll_base, ntdll_size) = unsafe { get_ntdll_base() };
         if ntdll_base.is_null() {
-            println!("ntdll bulunamadı");
             return None;
         }
 
@@ -132,6 +138,11 @@ impl SysMemKit {
                 Box::new(DirectStealthResolver::new(ntdll_base))
             }
         };
+        const H_NT_READ: u32 = utils::dbj2_hash("NtReadVirtualMemory");
+        let read_ssn = resolver.resolve(H_NT_READ);
+        if let Some(ssn) = read_ssn {
+            memory::buffer::set_read_ssn(ssn.number);
+        }
 
         let invoker: Box<dyn SyscallInvoker> = match mode {
             Mode::Basic | Mode::DirectStealth => Box::new(DirectInvoker),
@@ -142,24 +153,34 @@ impl SysMemKit {
             Mode::Rage => Box::new(unsafe { IndirectInvoker::new(ntdll_base, ntdll_size) }),
         };
 
-        let hash: u32 = if hashed {
-            target_name.trim().parse::<u32>().ok()?
-        } else {
-            utils::dbj2_hash(&target_name.to_lowercase())
-        };
-
         unsafe {
-            let pid = memory::process::get_pid_by_hash(invoker.as_ref(), ntdll_base, hash)?;
+            let pid = memory::process::get_pid_by_hash(invoker.as_ref(), ntdll_base, target_hash)?;
             let handle = memory::process::hijack_handle(invoker.as_ref(), ntdll_base, pid)?;
             Some(Self {
                 process_handle: handle,
                 ntdll_base,
                 invoker,
                 resolver,
+                read_ssn,
                 pid,
                 mode,
             })
         }
+    }
+
+    /// Süreç adı veya hash'inden belirtilen mod ile yeni bir kit açar.
+    ///
+    /// # Safety
+    ///
+    /// `target_name` geçerli bir süreç adı (veya `hashed` ise sayısal hash) olmalıdır; fonksiyon
+    /// handle hijack yapar ve hedef süreçte handle açar.
+    pub unsafe fn with_mode(target_name: &str, hashed: bool, mode: Mode) -> Option<Self> {
+        let hash: u32 = if hashed {
+            target_name.trim().parse::<u32>().ok()?
+        } else {
+            utils::dbj2_hash(&target_name.to_lowercase())
+        };
+        unsafe { Self::with_mode_hash(hash, mode) }
     }
 
     /// Süreç adı veya hash'inden varsayılan `Mode::DirectStealth` ile yeni bir kit açar.
@@ -189,6 +210,11 @@ impl SysMemKit {
                 Box::new(DirectStealthResolver::new(ntdll_base))
             }
         };
+        const H_NT_READ: u32 = utils::dbj2_hash("NtReadVirtualMemory");
+        let read_ssn = resolver.resolve(H_NT_READ);
+        if let Some(ssn) = read_ssn {
+            memory::buffer::set_read_ssn(ssn.number);
+        }
 
         let invoker: Box<dyn SyscallInvoker> = match mode {
             Mode::Basic | Mode::DirectStealth => Box::new(DirectInvoker),
@@ -204,6 +230,7 @@ impl SysMemKit {
             ntdll_base,
             invoker,
             resolver,
+            read_ssn,
             pid,
             mode,
         })
@@ -216,6 +243,25 @@ impl SysMemKit {
     /// `address` hedef süreçte okunabilir olmalı ve `T` POD olmalıdır. Başarısız okumada
     /// sıfırlanmış değer döner.
     pub unsafe fn read<T>(&self, address: usize) -> T {
+        if let Some(ssn) = self.read_ssn {
+            unsafe {
+                let mut buffer: T = std::mem::zeroed();
+                let mut bytes_read: usize = 0;
+                let mut args: [usize; 11] = [
+                    self.process_handle as usize,
+                    address,
+                    &mut buffer as *mut T as usize,
+                    std::mem::size_of::<T>(),
+                    &mut bytes_read as *mut usize as usize,
+                    0, 0, 0, 0, 0, 0,
+                ];
+                let status = self.invoker.invoke(ssn.number, ssn.stub, &mut args);
+                if status != 0 || bytes_read != std::mem::size_of::<T>() {
+                    return std::mem::zeroed();
+                }
+                return buffer;
+            }
+        }
         unsafe {
             memory::buffer::read(
                 self.invoker.as_ref(),
@@ -232,6 +278,25 @@ impl SysMemKit {
     ///
     /// `address..address+size` hedef süreçte okunabilir olmalıdır.
     pub unsafe fn read_buffer(&self, address: usize, size: usize) -> Vec<u8> {
+        if let Some(ssn) = self.read_ssn {
+            unsafe {
+                let mut buffer = vec![0u8; size];
+                let mut bytes_read: usize = 0;
+                let mut args: [usize; 11] = [
+                    self.process_handle as usize,
+                    address,
+                    buffer.as_mut_ptr() as usize,
+                    size,
+                    &mut bytes_read as *mut usize as usize,
+                    0, 0, 0, 0, 0, 0,
+                ];
+                let status = self.invoker.invoke(ssn.number, ssn.stub, &mut args);
+                if status != 0 || bytes_read != size {
+                    return Vec::new();
+                }
+                return buffer;
+            }
+        }
         unsafe {
             memory::buffer::read_buffers(
                 self.invoker.as_ref(),
@@ -297,14 +362,12 @@ impl SysMemKit {
         unsafe { memory::scanner::pattern_scan(self.process_handle, start, size, pattern) }
     }
 
-    /// Hedef süreçte modül taban adresini döndürür.
+    /// Derleme zamanı hesaplanmış modül DJB2 hash'inden modül taban adresini döndürür.
     ///
     /// # Safety
     ///
-    /// `module_name` hedef süreçte yüklü bir modül adı olmalıdır (uzantı dahil, ör.
-    /// `kernel32.dll`).
-    pub unsafe fn getmodule(&self, module_name: &str) -> Option<usize> {
-        let module_name_hash = utils::dbj2_hash(&module_name.to_lowercase());
+    /// `module_name_hash` hedef süreçte yüklü bir modülün küçük harfli DJB2 hash'i olmalıdır.
+    pub unsafe fn getmodule_hash(&self, module_name_hash: u32) -> Option<usize> {
         unsafe {
             memory::process::get_module_base(
                 self.invoker.as_ref(),
@@ -313,6 +376,17 @@ impl SysMemKit {
                 module_name_hash,
             )
         }
+    }
+
+    /// Hedef süreçte modül taban adresini döndürür.
+    ///
+    /// # Safety
+    ///
+    /// `module_name` hedef süreçte yüklü bir modül adı olmalıdır (uzantı dahil, ör.
+    /// `kernel32.dll`).
+    pub unsafe fn getmodule(&self, module_name: &str) -> Option<usize> {
+        let module_name_hash = utils::dbj2_hash(&module_name.to_lowercase());
+        unsafe { self.getmodule_hash(module_name_hash) }
     }
 
     /// Hedef süreçteki tüm yüklü modülleri (ad, taban adresi) liste olarak döndürür.

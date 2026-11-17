@@ -5,13 +5,30 @@ use crate::syscalls::resolver::get_ssn_by_hash;
 use crate::utils::dbj2_hash;
 use std::ffi::c_void;
 use std::mem;
+use std::sync::atomic::{AtomicU16, Ordering};
 
-/// `NtReadVirtualMemory` SSN'ini tek yerden çözer; bulunamazsa `None`.
+static CACHED_READ_SSN: AtomicU16 = AtomicU16::new(0);
+
+/// `NtReadVirtualMemory` SSN önbelleğini günceller.
+pub fn set_read_ssn(ssn: u16) {
+    if ssn != 0 && ssn != 0xFFFF {
+        CACHED_READ_SSN.store(ssn, Ordering::Relaxed);
+    }
+}
+
+/// `NtReadVirtualMemory` SSN'ini tek yerden çözer (önbellekli); bulunamazsa `None`.
 unsafe fn read_ssn(ntdll: *mut c_void) -> Option<u16> {
+    let cached = CACHED_READ_SSN.load(Ordering::Relaxed);
+    if cached != 0 {
+        return Some(cached);
+    }
     if ntdll.is_null() {
         return None;
     }
-    unsafe { get_ssn_by_hash(ntdll, dbj2_hash("NtReadVirtualMemory")) }
+    const HASH_NT_READ: u32 = dbj2_hash("NtReadVirtualMemory");
+    let ssn = unsafe { get_ssn_by_hash(ntdll, HASH_NT_READ) }?;
+    CACHED_READ_SSN.store(ssn, Ordering::Relaxed);
+    Some(ssn)
 }
 
 /// Uzak belleğe yazma: gerekirse sayfa korumasını değiştirip yazar, sonra eski korumayı geri koyar.
@@ -36,15 +53,19 @@ pub unsafe fn smart_write(
             return false;
         }
 
-        let ssn_query = match get_ssn_by_hash(ntdll, dbj2_hash("NtQueryVirtualMemory")) {
+        const HASH_NT_QUERY_VM: u32 = dbj2_hash("NtQueryVirtualMemory");
+        const HASH_NT_PROTECT_VM: u32 = dbj2_hash("NtProtectVirtualMemory");
+        const HASH_NT_WRITE_VM: u32 = dbj2_hash("NtWriteVirtualMemory");
+
+        let ssn_query = match get_ssn_by_hash(ntdll, HASH_NT_QUERY_VM) {
             Some(ssn) => ssn,
             None => return false,
         };
-        let ssn_protect = match get_ssn_by_hash(ntdll, dbj2_hash("NtProtectVirtualMemory")) {
+        let ssn_protect = match get_ssn_by_hash(ntdll, HASH_NT_PROTECT_VM) {
             Some(ssn) => ssn,
             None => return false,
         };
-        let ssn_write = match get_ssn_by_hash(ntdll, dbj2_hash("NtWriteVirtualMemory")) {
+        let ssn_write = match get_ssn_by_hash(ntdll, HASH_NT_WRITE_VM) {
             Some(ssn) => ssn,
             None => return false,
         };

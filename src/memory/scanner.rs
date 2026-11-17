@@ -56,7 +56,8 @@ pub unsafe fn find_hash_map_pattern(
         if ntdll.is_null() {
             return None;
         }
-        let ssn_read = get_ssn_by_hash(ntdll, dbj2_hash("NtReadVirtualMemory"))?;
+        const HASH_NT_READ: u32 = dbj2_hash("NtReadVirtualMemory");
+        let ssn_read = get_ssn_by_hash(ntdll, HASH_NT_READ)?;
 
         let mut buf = vec![0u8; CHUNK];
         let mut br: usize = 0;
@@ -124,7 +125,8 @@ pub unsafe fn pattern_scan(
         if ntdll.is_null() {
             return None;
         }
-        let ssn_read = get_ssn_by_hash(ntdll, dbj2_hash("NtReadVirtualMemory"))?;
+        const HASH_NT_READ: u32 = dbj2_hash("NtReadVirtualMemory");
+        let ssn_read = get_ssn_by_hash(ntdll, HASH_NT_READ)?;
 
         // DİKKAT: uzak okuma boyutu çağıranın istediği `size` olmalı.
         let mut buffer = vec![0u8; size];

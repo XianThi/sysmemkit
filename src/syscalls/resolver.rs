@@ -4,12 +4,12 @@ use crate::syscalls::{Ssn, SsnResolver};
 use std::ffi::c_void;
 use std::arch::asm;
 
-/// PEB modül listesinden belirtilen DLL'in taban adresini ve boyutunu döner.
+/// PEB modül listesinden belirtilen DLL'in DJB2 hash'ine göre taban adresini ve boyutunu döner.
 ///
 /// # Safety
 ///
 /// Yalnızca geçerli bir PEB ortamında ve x86_64 sürecinde çağrılmalıdır.
-pub unsafe fn get_dll_base(modulename: &str) -> (*mut c_void, usize) {
+pub unsafe fn get_dll_base_by_hash(module_hash: u32) -> (*mut c_void, usize) {
     let peb_ptr: *mut PEB;
     unsafe {
         asm!(
@@ -39,9 +39,9 @@ pub unsafe fn get_dll_base(modulename: &str) -> (*mut c_void, usize) {
                 if !dll_name.buffer.is_null() && dll_name.length > 0 {
                     let name_len = (dll_name.length / 2) as usize;
                     let name_slice = std::slice::from_raw_parts(dll_name.buffer, name_len);
-                    let name = String::from_utf16_lossy(name_slice);
+                    let name = String::from_utf16_lossy(name_slice).to_lowercase();
 
-                    if name.to_lowercase() == modulename {
+                    if utils::dbj2_hash(&name) == module_hash {
                         let dll_base = (*entry).dll_base;
                         let size_of_image = (*entry).size_of_image;
                         return (dll_base, size_of_image as usize);
@@ -56,25 +56,37 @@ pub unsafe fn get_dll_base(modulename: &str) -> (*mut c_void, usize) {
     }
 }
 
-/// PEB üzerinden ntdll image tabanını ve boyutunu döndürür.
+/// PEB modül listesinden belirtilen DLL'in taban adresini ve boyutunu döner.
+///
+/// # Safety
+///
+/// Yalnızca geçerli bir PEB ortamında ve x86_64 sürecinde çağrılmalıdır.
+pub unsafe fn get_dll_base(modulename: &str) -> (*mut c_void, usize) {
+    let target_hash = utils::dbj2_hash(&modulename.to_lowercase());
+    unsafe { get_dll_base_by_hash(target_hash) }
+}
+
+/// PEB üzerinden ntdll image tabanını ve boyutunu döndürür (derleme zamanı hash ile).
 ///
 /// # Safety
 ///
 /// Yalnızca Windows x64 süreçte çağrılmalıdır; PEB ve InLoadOrder listesi okunur. PEB'in
 /// geçerli olduğu varsayılır.
 pub unsafe fn get_ntdll_base() -> (*mut c_void, usize) {
-    unsafe { get_dll_base("ntdll.dll") }
+    const NTDLL_HASH: u32 = utils::dbj2_hash("ntdll.dll");
+    unsafe { get_dll_base_by_hash(NTDLL_HASH) }
 }
 
 // Faz 1'de feature flag arkasına alınacak; şu an sadece deney kodunda kullanılıyor.
 #[allow(dead_code)]
-/// win32u.dll taban adresini ve boyutunu döner.
+/// win32u.dll taban adresini ve boyutunu döner (derleme zamanı hash ile).
 ///
 /// # Safety
 ///
 /// PEB üzerinde yürütülür; geçerli bir Windows süreci gerektirir.
 pub unsafe fn get_win32u_base() -> (*mut c_void, usize) {
-    unsafe { get_dll_base("win32u.dll") }
+    const WIN32U_HASH: u32 = utils::dbj2_hash("win32u.dll");
+    unsafe { get_dll_base_by_hash(WIN32U_HASH) }
 }
 
 /// Teşhis: bir export fonksiyonunun ilk baytlarını döker.
@@ -658,14 +670,20 @@ impl ExportRvaResolver {
                 Err(_) => continue,
             };
 
-            if let Some(suffix) = name.strip_prefix("Zw") {
+            let bytes = name.as_bytes();
+            if bytes.len() > 2 && bytes[0] == b'Z' && bytes[1] == b'w' {
                 let ordinal = *ordinals_ptr.add(i as usize);
                 let func_rva = *functions_ptr.add(ordinal as usize);
                 let func_addr = ntdll_base as usize + func_rva as usize;
 
                 let zw_hash = utils::dbj2_hash(name);
-                let nt_name = format!("Nt{suffix}");
-                let nt_hash = utils::dbj2_hash(&nt_name);
+                // "Nt" + suffix DJB2 hash'ini string ayırmadan doğrudan byte dizisinden hesapla
+                let mut nt_hash: u32 = 5381;
+                nt_hash = (nt_hash << 5).wrapping_add(nt_hash).wrapping_add(b'N' as u32);
+                nt_hash = (nt_hash << 5).wrapping_add(nt_hash).wrapping_add(b't' as u32);
+                for &b in &bytes[2..] {
+                    nt_hash = (nt_hash << 5).wrapping_add(nt_hash).wrapping_add(b as u32);
+                }
 
                 if let Some(existing) = zw_entries.iter_mut().find(|e| e.rva == func_rva) {
                     if !existing.hashes.contains(&zw_hash) {
@@ -694,7 +712,8 @@ impl ExportRvaResolver {
                 Err(_) => continue,
             };
 
-            if name.starts_with("Nt") {
+            let bytes = name.as_bytes();
+            if bytes.len() > 2 && bytes[0] == b'N' && bytes[1] == b't' {
                 let ordinal = *ordinals_ptr.add(i as usize);
                 let func_rva = *functions_ptr.add(ordinal as usize);
                 let nt_hash = utils::dbj2_hash(name);

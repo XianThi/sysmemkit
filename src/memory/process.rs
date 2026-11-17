@@ -12,10 +12,20 @@ use crate::syscalls::SyscallInvoker;
 use crate::syscalls::resolver::get_ssn_by_hash;
 use crate::utils::dbj2_hash;
 
+const H_NT_QUERY_SYS: u32 = dbj2_hash("NtQuerySystemInformation");
+const H_NT_QUERY_PROC: u32 = dbj2_hash("NtQueryInformationProcess");
+const H_NT_READ_VM: u32 = dbj2_hash("NtReadVirtualMemory");
+const H_NT_OPEN_PROC: u32 = dbj2_hash("NtOpenProcess");
+const H_NT_DUP_OBJ: u32 = dbj2_hash("NtDuplicateObject");
+const H_NT_CLOSE: u32 = dbj2_hash("NtClose");
+const H_NT_OPEN_FILE: u32 = dbj2_hash("NtOpenFile");
+const H_NT_CREATE_SEC: u32 = dbj2_hash("NtCreateSection");
+const H_NT_MAP_SEC: u32 = dbj2_hash("NtMapViewOfSection");
+
 #[cfg(feature = "discord")]
 pub unsafe fn get_discord_overlay_pid(invoker: &dyn SyscallInvoker, ntdll: *mut c_void, discord_hash: u32) -> Option<u32> {
     unsafe {
-        let nt_query_hash = dbj2_hash("NtQuerySystemInformation");
+        let nt_query_hash = H_NT_QUERY_SYS;
         let ssn_query = get_ssn_by_hash(ntdll, nt_query_hash)?;
 
         let mut buffer_size = 0x40000;
@@ -143,8 +153,8 @@ fn get_process_command_line(
     unsafe {
         let handle = hijack_handle(invoker, ntdll, pid);
         if let Some(process_handle) = handle {
-            let ssn_query = get_ssn_by_hash(ntdll, dbj2_hash("NtQueryInformationProcess"))?;
-            let ssn_read = get_ssn_by_hash(ntdll, dbj2_hash("NtReadVirtualMemory"))?;
+            let ssn_query = get_ssn_by_hash(ntdll, H_NT_QUERY_PROC)?;
+            let ssn_read = get_ssn_by_hash(ntdll, H_NT_READ_VM)?;
 
             let mut pbi = PROCESS_BASIC_INFORMATION::default();
             let mut ret_len = 0u32;
@@ -231,7 +241,7 @@ pub unsafe fn get_pid_by_hash(
     target_name_hash: u32,
 ) -> Option<u32> {
     unsafe {
-        let nt_query_hash = dbj2_hash("NtQuerySystemInformation");
+        let nt_query_hash = H_NT_QUERY_SYS;
 
         let ssn_query = get_ssn_by_hash(ntdll, nt_query_hash)?;
         // print!(
@@ -319,7 +329,7 @@ pub unsafe fn manual_open_process(
             return None;
         }
 
-        let nt_open_hash = dbj2_hash("NtOpenProcess");
+        let nt_open_hash = H_NT_OPEN_PROC;
         let ssn_open = match get_ssn_by_hash(ntdll, nt_open_hash) {
             Some(ssn) => ssn,
             None => {
@@ -357,11 +367,11 @@ pub unsafe fn manual_open_process(
         let status = invoker.invoke(ssn_open, 0, &mut args);
 
         if status == 0 && !handle.is_null() {
-            let ssn_query = match get_ssn_by_hash(ntdll, dbj2_hash("NtQueryInformationProcess")) {
+            let ssn_query = match get_ssn_by_hash(ntdll, H_NT_QUERY_PROC) {
                 Some(ssn) => ssn,
                 None => {
                     let mut close_args: [usize; 11] = [handle as usize, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
-                    if let Some(ssn_close) = get_ssn_by_hash(ntdll, dbj2_hash("NtClose")) {
+                    if let Some(ssn_close) = get_ssn_by_hash(ntdll, H_NT_CLOSE) {
                         invoker.invoke(ssn_close, 0, &mut close_args);
                     }
                     return None;
@@ -383,7 +393,7 @@ pub unsafe fn manual_open_process(
             if test_status == 0 {
                 return Some(handle);
             } else {
-                let nt_close_hash = dbj2_hash("NtClose");
+                let nt_close_hash = H_NT_CLOSE;
                 let ssn_close = get_ssn_by_hash(ntdll, nt_close_hash)?;
                 let mut close_args: [usize; 11] = [handle as usize, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
                 invoker.invoke(ssn_close, 0, &mut close_args);
@@ -421,11 +431,11 @@ pub unsafe fn hijack_handle(
     }
 
     // 1. Gerekli syscall SSN'lerini çöz
-    let ssn_query_sys = get_ssn_by_hash(ntdll, dbj2_hash("NtQuerySystemInformation"));
-    let ssn_dup = get_ssn_by_hash(ntdll, dbj2_hash("NtDuplicateObject"));
-    let ssn_open = get_ssn_by_hash(ntdll, dbj2_hash("NtOpenProcess"));
-    let ssn_query_proc = get_ssn_by_hash(ntdll, dbj2_hash("NtQueryInformationProcess"));
-    let ssn_close = get_ssn_by_hash(ntdll, dbj2_hash("NtClose"));
+    let ssn_query_sys = get_ssn_by_hash(ntdll, H_NT_QUERY_SYS);
+    let ssn_dup = get_ssn_by_hash(ntdll, H_NT_DUP_OBJ);
+    let ssn_open = get_ssn_by_hash(ntdll, H_NT_OPEN_PROC);
+    let ssn_query_proc = get_ssn_by_hash(ntdll, H_NT_QUERY_PROC);
+    let ssn_close = get_ssn_by_hash(ntdll, H_NT_CLOSE);
 
     if let (Some(ssn_query_sys), Some(ssn_dup), Some(ssn_open), Some(ssn_query_proc), Some(ssn_close)) =
         (ssn_query_sys, ssn_dup, ssn_open, ssn_query_proc, ssn_close)
@@ -605,7 +615,7 @@ pub unsafe fn openfile(
         0, 0, 0, 0, 0,
     ];
 
-    let ssn = get_ssn_by_hash(ntdll, dbj2_hash("NtOpenFile"))?;
+    let ssn = get_ssn_by_hash(ntdll, H_NT_OPEN_FILE)?;
     let status = invoker.invoke(ssn, 0, &mut args);
 
     if status == 0 {
@@ -639,7 +649,7 @@ pub unsafe fn create_section(
         0, 0, 0, 0,
     ];
 
-    let ssn = get_ssn_by_hash(ntdll, dbj2_hash("NtCreateSection"))?;
+    let ssn = get_ssn_by_hash(ntdll, H_NT_CREATE_SEC)?;
     let status = invoker.invoke(ssn, 0, &mut args);
 
     if status == 0 {
@@ -677,7 +687,7 @@ pub unsafe fn map_view_of_section(
         0_usize,
     ];
 
-    let ssn = get_ssn_by_hash(ntdll, dbj2_hash("NtMapViewOfSection"))?;
+    let ssn = get_ssn_by_hash(ntdll, H_NT_MAP_SEC)?;
     let status = invoker.invoke(ssn, 0, &mut args);
 
     if status == 0 {
@@ -807,8 +817,8 @@ pub unsafe fn get_module_base(
         return None;
     }
 
-    let ssn_query = get_ssn_by_hash(ntdll, dbj2_hash("NtQueryInformationProcess"))?;
-    let ssn_read = get_ssn_by_hash(ntdll, dbj2_hash("NtReadVirtualMemory"))?;
+    let ssn_query = get_ssn_by_hash(ntdll, H_NT_QUERY_PROC)?;
+    let ssn_read = get_ssn_by_hash(ntdll, H_NT_READ_VM)?;
 
     let mut pbi = PROCESS_BASIC_INFORMATION::default();
     let mut ret_len = 0u32;
@@ -991,11 +1001,11 @@ pub unsafe fn get_all_modules(
         return modules;
     }
 
-    let ssn_query = match get_ssn_by_hash(ntdll, dbj2_hash("NtQueryInformationProcess")) {
+    let ssn_query = match get_ssn_by_hash(ntdll, H_NT_QUERY_PROC) {
         Some(s) => s,
         None => return modules,
     };
-    let ssn_read = match get_ssn_by_hash(ntdll, dbj2_hash("NtReadVirtualMemory")) {
+    let ssn_read = match get_ssn_by_hash(ntdll, H_NT_READ_VM) {
         Some(s) => s,
         None => return modules,
     };
